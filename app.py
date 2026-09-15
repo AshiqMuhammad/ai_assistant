@@ -359,43 +359,98 @@ USER QUESTION:
 # -----------------------------
 # Google Drive
 # -----------------------------
-def download_drive_link(drive_link):
-    """
-    Download a public Google Drive file or folder.
+def normalize_google_drive_link(drive_link):
+    """Clean a Google Drive URL and detect whether it is a file or folder."""
+    import re
+    from urllib.parse import urlparse
 
-    gdown can download public/shared Drive links. A private Drive item
-    requires an authenticated Google Drive integration.
-    """
-    temp_dir = tempfile.mkdtemp(prefix="drive_docs_")
+    link = drive_link.strip()
 
-    output = gdown.download_folder(
-        url=drive_link,
-        output=temp_dir,
-        quiet=True,
-        use_cookies=False,
+    # Folder: https://drive.google.com/drive/folders/FOLDER_ID?usp=drive_link
+    folder_match = re.search(r"/folders/([a-zA-Z0-9_-]+)", link)
+    if folder_match:
+        folder_id = folder_match.group(1)
+        return {
+            "type": "folder",
+            "id": folder_id,
+            "url": f"https://drive.google.com/drive/folders/{folder_id}",
+        }
+
+    # File: https://drive.google.com/file/d/FILE_ID/view?usp=sharing
+    file_match = re.search(r"/file/d/([a-zA-Z0-9_-]+)", link)
+    if file_match:
+        file_id = file_match.group(1)
+        return {
+            "type": "file",
+            "id": file_id,
+            "url": f"https://drive.google.com/file/d/{file_id}/view",
+        }
+
+    # Also support https://drive.google.com/open?id=FILE_ID
+    parsed = urlparse(link)
+    query = dict(
+        item.split("=", 1)
+        for item in parsed.query.split("&")
+        if "=" in item
     )
 
-    if output is None:
-        # Try the link as a single file.
-        file_path = Path(temp_dir) / "drive_file"
-        downloaded = gdown.download(
-            url=drive_link,
-            output=str(file_path),
+    if "id" in query:
+        file_id = query["id"]
+        return {
+            "type": "file",
+            "id": file_id,
+            "url": f"https://drive.google.com/uc?id={file_id}",
+        }
+
+    raise ValueError(
+        "Invalid Google Drive link. Paste a Drive file or folder sharing link."
+    )
+
+
+def download_drive_link(drive_link):
+    """Download a public Google Drive file or folder."""
+    temp_dir = Path(tempfile.mkdtemp(prefix="drive_docs_"))
+    drive = normalize_google_drive_link(drive_link)
+
+    if drive["type"] == "folder":
+        # Pass the clean folder URL. This avoids treating ?usp=drive_link
+        # or other query parameters as part of the folder ID.
+        gdown.download_folder(
+            url=drive["url"],
+            output=str(temp_dir),
             quiet=True,
-            fuzzy=True,
+            use_cookies=False,
+        )
+    else:
+        # Ask gdown for the real Drive filename first so the extension is kept.
+        metadata = gdown.download(
+            url=drive["url"],
+            output=None,
+            quiet=True,
+            use_cookies=False,
+            skip_download=True,
         )
 
-        if not downloaded:
-            return []
+        if metadata is None or not metadata.path:
+            raise ValueError(
+                "Could not read the Drive file information. "
+                "Check that the file is shared as 'Anyone with the link'."
+            )
 
-    supported_files = []
+        filename = Path(metadata.path).name
+        output_path = temp_dir / filename
+        gdown.download(
+            url=drive["url"],
+            output=str(output_path),
+            quiet=True,
+            use_cookies=False,
+        )
 
-    for path in Path(temp_dir).rglob("*"):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
-            supported_files.append(path)
-
-    return supported_files
-
+    return [
+        path
+        for path in temp_dir.rglob("*")
+        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS
+    ]
 
 def read_uploaded_file(uploaded_file):
     """Save a Streamlit UploadedFile to a temporary path."""
