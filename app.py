@@ -1,14 +1,12 @@
 import os
 import re
 import io
-import tempfile
-from pathlib import Path
-
 import numpy as np
 import requests
 import streamlit as st
 import faiss
 
+from pathlib import Path
 from pypdf import PdfReader
 from docx import Document
 from sentence_transformers import SentenceTransformer
@@ -23,11 +21,12 @@ st.set_page_config(
     page_title="AI Document Assistant",
     page_icon="📚",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
 
 # ============================================================
-# CSS
+# CUSTOM CSS
 # ============================================================
 
 st.markdown(
@@ -50,39 +49,7 @@ st.markdown(
     .hero p {
         color: #d1d5db;
         font-size: 16px;
-    }
-
-    .card {
-        background: white;
-        padding: 18px;
-        border-radius: 14px;
-        border: 1px solid #e5e7eb;
-        margin-bottom: 12px;
-    }
-
-    .source-card {
-        background: white;
-        padding: 16px;
-        border-radius: 12px;
-        border: 1px solid #e5e7eb;
-        margin-bottom: 12px;
-    }
-
-    .source-title {
-        font-size: 16px;
-        font-weight: 700;
-    }
-
-    .source-meta {
-        color: #6b7280;
-        font-size: 13px;
-        margin-top: 5px;
-        margin-bottom: 8px;
-    }
-
-    .source-text {
-        font-size: 14px;
-        line-height: 1.6;
+        margin-top: 8px;
     }
 
     </style>
@@ -139,7 +106,7 @@ def get_embedding_model():
 
 
 # ============================================================
-# GROQ CLIENT
+# LOAD GROQ
 # ============================================================
 
 @st.cache_resource
@@ -180,7 +147,7 @@ def clean_text(text):
 
 
 # ============================================================
-# PDF EXTRACTION FROM BYTES
+# PDF READER
 # ============================================================
 
 def extract_pdf_bytes(
@@ -241,7 +208,7 @@ def extract_pdf_bytes(
 
 
 # ============================================================
-# DOCX EXTRACTION FROM BYTES
+# DOCX READER
 # ============================================================
 
 def extract_docx_bytes(
@@ -263,6 +230,7 @@ def extract_docx_bytes(
 
         paragraphs = []
 
+        # Normal paragraphs
         for paragraph in document.paragraphs:
 
             text = paragraph.text.strip()
@@ -273,12 +241,12 @@ def extract_docx_bytes(
                     text
                 )
 
-        # Also read tables
+        # Tables
         for table in document.tables:
 
             for row in table.rows:
 
-                row_text = []
+                cells = []
 
                 for cell in row.cells:
 
@@ -288,14 +256,14 @@ def extract_docx_bytes(
 
                     if cell_text:
 
-                        row_text.append(
+                        cells.append(
                             cell_text
                         )
 
-                if row_text:
+                if cells:
 
                     paragraphs.append(
-                        " | ".join(row_text)
+                        " | ".join(cells)
                     )
 
         full_text = "\n".join(
@@ -333,7 +301,7 @@ def extract_docx_bytes(
 
 
 # ============================================================
-# TXT EXTRACTION
+# TXT READER
 # ============================================================
 
 def extract_txt_bytes(
@@ -375,7 +343,7 @@ def extract_txt_bytes(
 
 
 # ============================================================
-# MARKDOWN EXTRACTION
+# MARKDOWN READER
 # ============================================================
 
 def extract_md_bytes(
@@ -417,7 +385,7 @@ def extract_md_bytes(
 
 
 # ============================================================
-# MAIN FILE READER
+# FILE READER
 # ============================================================
 
 def read_file_bytes(
@@ -506,6 +474,7 @@ def create_chunks(records):
                 )
 
             if end >= len(text):
+
                 break
 
             start = (
@@ -516,7 +485,7 @@ def create_chunks(records):
 
 
 # ============================================================
-# BUILD FAISS
+# BUILD FAISS INDEX
 # ============================================================
 
 def rebuild_index():
@@ -566,12 +535,13 @@ def rebuild_index():
 
 
 # ============================================================
-# PROCESS RECORDS
+# PROCESS DOCUMENT
 # ============================================================
 
 def process_records(records):
 
     if not records:
+
         return
 
     new_chunks = create_chunks(
@@ -579,6 +549,7 @@ def process_records(records):
     )
 
     if not new_chunks:
+
         return
 
     st.session_state.chunks.extend(
@@ -613,7 +584,7 @@ def process_records(records):
 
 
 # ============================================================
-# GOOGLE ID
+# GOOGLE LINK ID
 # ============================================================
 
 def get_google_id(url):
@@ -627,6 +598,7 @@ def get_google_id(url):
         r"drive\.google\.com/uc\?id=([^&]+)",
 
         r"docs\.google\.com/document/d/([^/]+)",
+
     ]
 
     for pattern in patterns:
@@ -644,7 +616,7 @@ def get_google_id(url):
 
 
 # ============================================================
-# DOWNLOAD GOOGLE DOC
+# GOOGLE DOC DOWNLOAD
 # ============================================================
 
 def download_google_doc(url):
@@ -679,21 +651,21 @@ def download_google_doc(url):
 
     content = response.content
 
-    # A real DOCX is a ZIP file and starts with PK
+    # Valid DOCX files are ZIP packages
     if not content.startswith(
         b"PK"
     ):
 
         raise ValueError(
-            "Google Docs did not return a valid DOCX file. "
-            "Check that the document is publicly accessible."
+            "Google Docs did not return a valid DOCX. "
+            "Check the sharing permission."
         )
 
     return content
 
 
 # ============================================================
-# DOWNLOAD GOOGLE DRIVE FILE
+# GOOGLE DRIVE FILE DOWNLOAD
 # ============================================================
 
 def download_google_drive_file(url):
@@ -735,25 +707,26 @@ def download_google_drive_file(url):
         .lower()
     )
 
+    # PDF
     if content.startswith(
         b"%PDF"
     ):
 
         return content, ".pdf"
 
+    # DOCX
     if content.startswith(
         b"PK"
     ):
 
         return content, ".docx"
 
-    # Google sometimes returns HTML
     if "text/html" in content_type:
 
         raise ValueError(
             "Google Drive returned a web page instead "
-            "of the file. Make sure the file is shared "
-            "as 'Anyone with the link → Viewer'."
+            "of the file. Set sharing to "
+            "'Anyone with the link → Viewer'."
         )
 
     raise ValueError(
@@ -812,6 +785,7 @@ def semantic_search(
     ):
 
         if index < 0:
+
             continue
 
         result = dict(
@@ -832,7 +806,7 @@ def semantic_search(
 
 
 # ============================================================
-# KEYWORD SCORE
+# KEYWORD SEARCH SCORE
 # ============================================================
 
 def keyword_score(
@@ -884,6 +858,7 @@ def hybrid_search(
     )
 
     if not candidates:
+
         return []
 
     for item in candidates:
@@ -912,7 +887,7 @@ def hybrid_search(
 
 
 # ============================================================
-# ANSWER WITH GROQ
+# GROQ ANSWER
 # ============================================================
 
 def answer_question(
@@ -968,29 +943,30 @@ Filename:
 Content:
 {result['text']}
 
--------------------------
+-----------------------------
 """
 
     prompt = f"""
 You are an AI Document Assistant.
 
-Answer ONLY using the provided document context.
+Answer the user's question ONLY using
+the provided document context.
 
 Do not use outside knowledge.
 
 Do not invent information.
 
-If the answer is not present in the
+If the answer is not available in the
 documents, say:
 
 "I could not find this information
 in the uploaded documents."
 
-User question:
+USER QUESTION:
 
 {question}
 
-Document context:
+DOCUMENT CONTEXT:
 
 {context}
 """
@@ -1009,7 +985,8 @@ Document context:
                         "role": "system",
                         "content": (
                             "Answer strictly "
-                            "from document context."
+                            "from the supplied "
+                            "document context."
                         ),
                     },
                     {
@@ -1032,7 +1009,7 @@ Document context:
     except Exception as e:
 
         return (
-            "Groq error:\n\n"
+            "Groq/API error:\n\n"
             + str(e)
         )
 
@@ -1101,8 +1078,7 @@ with st.sidebar:
                 ):
 
                     file_bytes = (
-                        uploaded_file
-                        .getvalue()
+                        uploaded_file.getvalue()
                     )
 
                     records = read_file_bytes(
@@ -1142,9 +1118,7 @@ with st.sidebar:
 
     google_url = st.text_input(
         "Google Drive / Google Docs link",
-        placeholder=(
-            "Paste public link here"
-        ),
+        placeholder="Paste public link here",
     )
 
     if st.button(
@@ -1162,6 +1136,7 @@ with st.sidebar:
 
             try:
 
+                # Google Docs
                 if (
                     "docs.google.com/document"
                     in google_url
@@ -1192,6 +1167,7 @@ with st.sidebar:
                         "Google Doc loaded successfully."
                     )
 
+                # Google Drive
                 elif (
                     "drive.google.com"
                     in google_url
@@ -1240,7 +1216,7 @@ with st.sidebar:
     st.divider()
 
     if st.button(
-        "🗑️ Clear Documents",
+        "🗑️ Clear All Documents",
         use_container_width=True,
     ):
 
@@ -1260,37 +1236,40 @@ with st.sidebar:
 
 
 # ============================================================
-# METRICS
+# DASHBOARD
 # ============================================================
 
-c1, c2, c3 = st.columns(3)
+col1, col2, col3 = st.columns(3)
 
-with c1:
+with col1:
 
     st.metric(
-        "Documents",
+        "📄 Documents",
         len(
             st.session_state.documents
         )
     )
 
-with c2:
+with col2:
 
     st.metric(
-        "Chunks",
+        "🧩 Chunks",
         len(
             st.session_state.chunks
         )
     )
 
-with c3:
+with col3:
+
+    question_count = sum(
+        1
+        for message in st.session_state.messages
+        if message["role"] == "user"
+    )
 
     st.metric(
-        "Questions",
-        len(
-            st.session_state.messages
-        )
-        // 2
+        "💬 Questions",
+        question_count
     )
 
 
@@ -1308,24 +1287,15 @@ if st.session_state.documents:
         st.session_state.documents
     ):
 
-        st.markdown(
-            f"""
-            <div class="card">
-
-                <b>
-                    📄 {document['filename']}
-                </b>
-
-                <br>
-
-                <small>
-                    Source: {document['source']}
-                </small>
-
-            </div>
-            """,
-            unsafe_allow_html=True
+        st.write(
+            f"📄 **{document['filename']}**"
         )
+
+        st.caption(
+            f"Source: {document['source']}"
+        )
+
+        st.divider()
 
 else:
 
@@ -1337,7 +1307,7 @@ else:
 
 
 # ============================================================
-# CHAT
+# ASK QUESTION
 # ============================================================
 
 st.subheader(
@@ -1367,15 +1337,16 @@ if question:
         )
 
         with st.spinner(
-            "Searching documents..."
+            "🔎 Searching documents..."
         ):
 
             results = hybrid_search(
-                question
+                question,
+                top_k=5
             )
 
         with st.spinner(
-            "Generating answer..."
+            "🤖 Generating answer..."
         ):
 
             answer = answer_question(
@@ -1393,7 +1364,7 @@ if question:
 
 
 # ============================================================
-# DISPLAY CHAT
+# SHOW CHAT
 # ============================================================
 
 for message in (
@@ -1470,65 +1441,25 @@ for message in (
 
                         preview += "..."
 
-                    # Escape HTML-sensitive text
-                    # so document content cannot
-                    # break the UI.
-                    preview = (
-                        preview
-                        .replace(
-                            "&",
-                            "&amp;"
-                        )
-                        .replace(
-                            "<",
-                            "&lt;"
-                        )
-                        .replace(
-                            ">",
-                            "&gt;"
-                        )
-                    )
+                    # IMPORTANT:
+                    # We use Streamlit components
+                    # instead of displaying HTML.
+                    with st.expander(
+                        f"📄 {i}. {filename} — {location}"
+                    ):
 
-                    filename_display = (
-                        filename
-                        .replace(
-                            "&",
-                            "&amp;"
+                        st.write(
+                            f"**Relevance:** "
+                            f"{score:.3f}"
                         )
-                        .replace(
-                            "<",
-                            "&lt;"
+
+                        st.write(
+                            "**Retrieved text:**"
                         )
-                        .replace(
-                            ">",
-                            "&gt;"
+
+                        st.write(
+                            preview
                         )
-                    )
-
-                    st.markdown(
-                        f"""
-                        <div class="source-card">
-
-                            <div class="source-title">
-                                {i}. 📄
-                                {filename_display}
-                            </div>
-
-                            <div class="source-meta">
-                                {location}
-                                &nbsp; • &nbsp;
-                                Relevance:
-                                {score:.3f}
-                            </div>
-
-                            <div class="source-text">
-                                {preview}
-                            </div>
-
-                        </div>
-                        """,
-                        unsafe_allow_html=True
-                    )
 
 
 # ============================================================
