@@ -5,4 +5,4 @@ numpy
 pypdf
 python-docx
 groq
-gdown
+gdown>=6.2.0
