@@ -2,42 +2,125 @@ import os
 import re
 import tempfile
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
 
-import faiss
-import gdown
 import numpy as np
 import requests
 import streamlit as st
+import faiss
 
-from docx import Document
-from groq import Groq
 from pypdf import PdfReader
+from docx import Document
 from sentence_transformers import SentenceTransformer
+from groq import Groq
 
 
 # ============================================================
-# APP CONFIGURATION
+# PAGE CONFIG
 # ============================================================
 
 st.set_page_config(
-    page_title="DocuMind AI | Document Assistant",
+    page_title="AI Document Assistant",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
 
-SUPPORTED_EXTENSIONS = {
-    ".pdf",
-    ".docx",
-    ".txt",
-    ".md",
-}
+# ============================================================
+# CUSTOM CSS
+# ============================================================
 
-CHUNK_SIZE = 700
-CHUNK_OVERLAP = 120
-TOP_K = 5
+st.markdown(
+    """
+    <style>
+
+    .main {
+        background-color: #f7f8fa;
+    }
+
+    .hero {
+        padding: 28px;
+        border-radius: 18px;
+        background: linear-gradient(135deg, #111827, #1f2937);
+        color: white;
+        margin-bottom: 25px;
+    }
+
+    .hero h1 {
+        margin: 0;
+        font-size: 34px;
+    }
+
+    .hero p {
+        margin-top: 8px;
+        color: #d1d5db;
+        font-size: 16px;
+    }
+
+    .card {
+        background: white;
+        padding: 20px;
+        border-radius: 15px;
+        border: 1px solid #e5e7eb;
+        margin-bottom: 15px;
+    }
+
+    .source-card {
+        background: white;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid #e5e7eb;
+        margin-bottom: 12px;
+    }
+
+    .source-title {
+        font-size: 16px;
+        font-weight: 700;
+        margin-bottom: 6px;
+    }
+
+    .source-meta {
+        font-size: 13px;
+        color: #6b7280;
+        margin-bottom: 8px;
+    }
+
+    .source-text {
+        font-size: 14px;
+        color: #374151;
+        line-height: 1.6;
+    }
+
+    .answer-card {
+        background: white;
+        padding: 22px;
+        border-radius: 15px;
+        border: 1px solid #e5e7eb;
+        line-height: 1.7;
+    }
+
+    .metric-card {
+        background: white;
+        padding: 18px;
+        border-radius: 14px;
+        border: 1px solid #e5e7eb;
+        text-align: center;
+    }
+
+    .metric-number {
+        font-size: 28px;
+        font-weight: 700;
+    }
+
+    .metric-label {
+        color: #6b7280;
+        font-size: 13px;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -56,453 +139,278 @@ if "embeddings" not in st.session_state:
 if "index" not in st.session_state:
     st.session_state.index = None
 
-if "processed_files" not in st.session_state:
-    st.session_state.processed_files = set()
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
-
-# ============================================================
-# CUSTOM CSS
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-
-    /* -----------------------------
-       GLOBAL
-    ----------------------------- */
-
-    .stApp {
-        background: #f6f7fb;
-    }
-
-    .block-container {
-        max-width: 1450px;
-        padding-top: 2rem;
-        padding-bottom: 4rem;
-    }
-
-
-    /* -----------------------------
-       SIDEBAR
-    ----------------------------- */
-
-    section[data-testid="stSidebar"] {
-        background: #111827;
-    }
-
-    section[data-testid="stSidebar"] * {
-        color: #f9fafb;
-    }
-
-    section[data-testid="stSidebar"] .stTextInput input {
-        background: #1f2937;
-        color: white;
-        border: 1px solid #374151;
-    }
-
-    section[data-testid="stSidebar"] .stFileUploader {
-        background: #1f2937;
-        border-radius: 12px;
-        padding: 8px;
-    }
-
-
-    /* -----------------------------
-       HERO
-    ----------------------------- */
-
-    .hero {
-        background: linear-gradient(
-            135deg,
-            #111827 0%,
-            #1f2937 55%,
-            #374151 100%
-        );
-
-        border-radius: 22px;
-        padding: 34px 38px;
-        margin-bottom: 25px;
-
-        box-shadow:
-            0 12px 30px rgba(0, 0, 0, 0.12);
-    }
-
-    .hero-title {
-        font-size: 38px;
-        font-weight: 800;
-        color: white;
-        letter-spacing: -1px;
-        margin-bottom: 7px;
-    }
-
-    .hero-subtitle {
-        font-size: 16px;
-        color: #d1d5db;
-        max-width: 760px;
-        line-height: 1.6;
-    }
-
-    .online-badge {
-        display: inline-block;
-        margin-top: 16px;
-        padding: 6px 13px;
-        border-radius: 999px;
-
-        background: #064e3b;
-        color: #a7f3d0;
-
-        font-size: 12px;
-        font-weight: 700;
-        letter-spacing: 0.5px;
-    }
-
-
-    /* -----------------------------
-       SECTION HEADINGS
-    ----------------------------- */
-
-    .section-title {
-        font-size: 22px;
-        font-weight: 750;
-        color: #111827;
-        margin-top: 28px;
-        margin-bottom: 14px;
-    }
-
-
-    /* -----------------------------
-       CARDS
-    ----------------------------- */
-
-    .document-card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 18px 20px;
-        margin-bottom: 12px;
-
-        box-shadow:
-            0 3px 12px rgba(0, 0, 0, 0.035);
-    }
-
-    .document-name {
-        font-size: 16px;
-        font-weight: 700;
-        color: #111827;
-    }
-
-    .document-meta {
-        font-size: 13px;
-        color: #6b7280;
-        margin-top: 5px;
-    }
-
-
-    /* -----------------------------
-       SOURCE CARDS
-    ----------------------------- */
-
-    .source-card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 15px;
-        padding: 18px 20px;
-        margin-bottom: 12px;
-
-        box-shadow:
-            0 3px 12px rgba(0, 0, 0, 0.035);
-    }
-
-    .source-title {
-        font-size: 15px;
-        font-weight: 750;
-        color: #111827;
-    }
-
-    .source-meta {
-        color: #6b7280;
-        font-size: 12px;
-        margin-top: 5px;
-    }
-
-    .source-text {
-        color: #374151;
-        font-size: 14px;
-        line-height: 1.65;
-        margin-top: 12px;
-    }
-
-
-    /* -----------------------------
-       INFO BOX
-    ----------------------------- */
-
-    .info-card {
-        background: white;
-        border: 1px solid #e5e7eb;
-        border-radius: 16px;
-        padding: 20px;
-    }
-
-
-    /* -----------------------------
-       FOOTER
-    ----------------------------- */
-
-    .footer {
-        text-align: center;
-        color: #9ca3af;
-        font-size: 12px;
-        padding-top: 35px;
-    }
-
-
-    /* -----------------------------
-       STREAMLIT CLEANUP
-    ----------------------------- */
-
-    #MainMenu {
-        visibility: hidden;
-    }
-
-    footer {
-        visibility: hidden;
-    }
-
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+if "processed_names" not in st.session_state:
+    st.session_state.processed_names = set()
 
 
 # ============================================================
-# CACHED MODELS
+# CONSTANTS
+# ============================================================
+
+SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".docx",
+    ".txt",
+    ".md",
+}
+
+CHUNK_SIZE = 700
+CHUNK_OVERLAP = 120
+
+EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+
+GROQ_MODEL = "openai/gpt-oss-120b"
+
+
+# ============================================================
+# LOAD EMBEDDING MODEL
 # ============================================================
 
 @st.cache_resource
 def load_embedding_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+    return SentenceTransformer(EMBEDDING_MODEL)
 
+
+# ============================================================
+# LOAD GROQ CLIENT
+# ============================================================
 
 @st.cache_resource
-def load_groq_client():
-
-    try:
-        api_key = st.secrets.get(
-            "GROQ_API_KEY",
-            os.getenv("GROQ_API_KEY"),
-        )
-    except Exception:
-        api_key = os.getenv("GROQ_API_KEY")
-
-    if not api_key:
-        return None
-
+def load_groq_client(api_key):
     return Groq(api_key=api_key)
 
 
 # ============================================================
-# DOCUMENT EXTRACTION
+# TEXT CLEANING
 # ============================================================
 
-def extract_pdf(file_path):
-    """Extract one record per PDF page."""
+def clean_text(text):
+    if not text:
+        return ""
 
-    reader = PdfReader(file_path)
+    text = text.replace("\x00", " ")
 
+    # Remove excessive spaces
+    text = re.sub(r"[ \t]+", " ", text)
+
+    # Remove excessive blank lines
+    text = re.sub(r"\n\s*\n+", "\n\n", text)
+
+    return text.strip()
+
+
+# ============================================================
+# PDF EXTRACTION
+# ============================================================
+
+def extract_pdf(file_path, filename):
     records = []
 
-    for page_number, page in enumerate(
-        reader.pages,
-        start=1,
-    ):
+    try:
+        reader = PdfReader(file_path)
 
-        text = page.extract_text() or ""
+        for page_number, page in enumerate(reader.pages, start=1):
 
-        if text.strip():
+            try:
+                text = page.extract_text() or ""
+            except Exception:
+                text = ""
 
-            records.append(
-                {
-                    "filename": Path(file_path).name,
-                    "page": page_number,
-                    "text": text.strip(),
-                }
-            )
+            text = clean_text(text)
+
+            if text:
+                records.append(
+                    {
+                        "text": text,
+                        "filename": filename,
+                        "page": page_number,
+                        "source": "PDF",
+                    }
+                )
+
+    except Exception as e:
+        st.error(f"Could not read PDF: {e}")
 
     return records
 
 
-def extract_docx(file_path):
-    """Extract text from DOCX."""
+# ============================================================
+# DOCX EXTRACTION
+# ============================================================
 
-    document = Document(file_path)
+def extract_docx(file_path, filename):
+    records = []
 
-    paragraphs = [
-        paragraph.text.strip()
-        for paragraph in document.paragraphs
-        if paragraph.text.strip()
-    ]
+    try:
+        doc = Document(file_path)
 
-    text = "\n".join(paragraphs)
+        paragraphs = []
 
-    if not text:
-        return []
+        for paragraph in doc.paragraphs:
+            text = paragraph.text.strip()
 
-    return [
-        {
-            "filename": Path(file_path).name,
-            "page": None,
-            "text": text,
-        }
-    ]
+            if text:
+                paragraphs.append(text)
 
+        full_text = "\n".join(paragraphs)
+        full_text = clean_text(full_text)
 
-def extract_txt(file_path):
-    """Extract TXT text."""
+        if full_text:
+            records.append(
+                {
+                    "text": full_text,
+                    "filename": filename,
+                    "page": None,
+                    "source": "DOCX",
+                }
+            )
 
-    text = Path(file_path).read_text(
-        encoding="utf-8",
-        errors="ignore",
-    ).strip()
+    except Exception as e:
+        st.error(f"Could not read DOCX: {e}")
 
-    if not text:
-        return []
-
-    return [
-        {
-            "filename": Path(file_path).name,
-            "page": None,
-            "text": text,
-        }
-    ]
+    return records
 
 
-def extract_md(file_path):
-    """Extract Markdown text."""
+# ============================================================
+# TXT EXTRACTION
+# ============================================================
 
-    text = Path(file_path).read_text(
-        encoding="utf-8",
-        errors="ignore",
-    ).strip()
+def extract_txt(file_path, filename):
+    records = []
 
-    if not text:
-        return []
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
 
-    return [
-        {
-            "filename": Path(file_path).name,
-            "page": None,
-            "text": text,
-        }
-    ]
+        text = clean_text(text)
+
+        if text:
+            records.append(
+                {
+                    "text": text,
+                    "filename": filename,
+                    "page": None,
+                    "source": "TXT",
+                }
+            )
+
+    except Exception as e:
+        st.error(f"Could not read TXT: {e}")
+
+    return records
 
 
-def extract_document(file_path):
-    """Choose extraction method according to file extension."""
+# ============================================================
+# MARKDOWN EXTRACTION
+# ============================================================
 
-    extension = Path(file_path).suffix.lower()
+def extract_md(file_path, filename):
+    records = []
+
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+
+        text = clean_text(text)
+
+        if text:
+            records.append(
+                {
+                    "text": text,
+                    "filename": filename,
+                    "page": None,
+                    "source": "MD",
+                }
+            )
+
+    except Exception as e:
+        st.error(f"Could not read Markdown: {e}")
+
+    return records
+
+
+# ============================================================
+# FILE EXTRACTION ROUTER
+# ============================================================
+
+def extract_document(file_path, filename):
+
+    extension = Path(filename).suffix.lower()
 
     if extension == ".pdf":
-        return extract_pdf(file_path)
+        return extract_pdf(file_path, filename)
 
     if extension == ".docx":
-        return extract_docx(file_path)
+        return extract_docx(file_path, filename)
 
     if extension == ".txt":
-        return extract_txt(file_path)
+        return extract_txt(file_path, filename)
 
     if extension == ".md":
-        return extract_md(file_path)
+        return extract_md(file_path, filename)
 
     return []
 
 
 # ============================================================
-# TEXT CHUNKING
+# CHUNKING
 # ============================================================
 
-def split_text(
-    text,
-    chunk_size=CHUNK_SIZE,
-    overlap=CHUNK_OVERLAP,
-):
-    """Create overlapping text chunks."""
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
-
-    if not text:
-        return []
+def create_chunks(records):
 
     chunks = []
 
-    start = 0
+    for record in records:
 
-    while start < len(text):
+        text = record["text"]
 
-        end = min(
-            start + chunk_size,
-            len(text),
-        )
+        start = 0
+        text_length = len(text)
 
-        chunk = text[start:end].strip()
+        while start < text_length:
 
-        if chunk:
-            chunks.append(chunk)
+            end = min(start + CHUNK_SIZE, text_length)
 
-        if end == len(text):
-            break
+            chunk_text = text[start:end].strip()
 
-        start = max(
-            end - overlap,
-            start + 1,
-        )
+            if chunk_text:
+
+                chunks.append(
+                    {
+                        "text": chunk_text,
+                        "filename": record["filename"],
+                        "page": record["page"],
+                        "source": record["source"],
+                    }
+                )
+
+            if end >= text_length:
+                break
+
+            start = end - CHUNK_OVERLAP
 
     return chunks
 
 
-def create_chunks(records):
-    """Create chunks while preserving metadata."""
-
-    all_chunks = []
-
-    for record in records:
-
-        pieces = split_text(
-            record["text"]
-        )
-
-        for piece in pieces:
-
-            all_chunks.append(
-                {
-                    "filename": record["filename"],
-                    "page": record["page"],
-                    "text": piece,
-                }
-            )
-
-    return all_chunks
-
-
 # ============================================================
-# EMBEDDINGS + FAISS
+# BUILD FAISS INDEX
 # ============================================================
 
-def create_embeddings(chunks):
+def rebuild_index():
+
+    if not st.session_state.chunks:
+        st.session_state.index = None
+        st.session_state.embeddings = None
+        return
 
     model = load_embedding_model()
 
     texts = [
         chunk["text"]
-        for chunk in chunks
+        for chunk in st.session_state.chunks
     ]
 
     embeddings = model.encode(
@@ -510,245 +418,340 @@ def create_embeddings(chunks):
         convert_to_numpy=True,
         normalize_embeddings=True,
         show_progress_bar=False,
-    ).astype("float32")
+    )
 
-    return embeddings
-
-
-def build_faiss_index(embeddings):
-
-    dimension = embeddings.shape[1]
+    embeddings = np.asarray(
+        embeddings,
+        dtype="float32",
+    )
 
     index = faiss.IndexFlatIP(
-        dimension
+        embeddings.shape[1]
     )
 
     index.add(embeddings)
 
-    return index
-
-
-def process_documents(records):
-
-    chunks = create_chunks(records)
-
-    if not chunks:
-        return [], None, None
-
-    embeddings = create_embeddings(
-        chunks
-    )
-
-    index = build_faiss_index(
-        embeddings
-    )
-
-    return (
-        chunks,
-        embeddings,
-        index,
-    )
+    st.session_state.embeddings = embeddings
+    st.session_state.index = index
 
 
 # ============================================================
-# KEYWORD SEARCH
+# PROCESS DOCUMENTS
 # ============================================================
 
-STOPWORDS = {
-    "the",
-    "a",
-    "an",
-    "and",
-    "or",
-    "is",
-    "are",
-    "was",
-    "were",
-    "to",
-    "of",
-    "in",
-    "on",
-    "for",
-    "with",
-    "what",
-    "which",
-    "who",
-    "when",
-    "where",
-    "why",
-    "how",
-    "does",
-    "do",
-    "did",
-    "this",
-    "that",
-    "these",
-    "those",
-    "from",
-    "as",
-    "by",
-    "be",
-    "can",
-    "could",
-    "would",
-    "should",
-    "about",
-    "it",
-    "its",
-}
+def process_records(records):
+
+    if not records:
+        return
+
+    new_chunks = create_chunks(records)
+
+    if not new_chunks:
+        return
+
+    st.session_state.chunks.extend(new_chunks)
+
+    for record in records:
+        if record["filename"] not in st.session_state.processed_names:
+            st.session_state.documents.append(
+                {
+                    "filename": record["filename"],
+                    "source": record["source"],
+                }
+            )
+
+            st.session_state.processed_names.add(
+                record["filename"]
+            )
+
+    rebuild_index()
 
 
-def important_words(question):
+# ============================================================
+# SAVE UPLOADED FILE
+# ============================================================
 
-    words = re.findall(
-        r"\b[a-zA-Z0-9]+\b",
-        question.lower(),
+def save_uploaded_file(uploaded_file):
+
+    suffix = Path(uploaded_file.name).suffix
+
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix,
     )
 
-    return [
-        word
-        for word in words
-        if word not in STOPWORDS
-        and len(word) > 2
+    temp_file.write(
+        uploaded_file.getbuffer()
+    )
+
+    temp_file.close()
+
+    return temp_file.name
+
+
+# ============================================================
+# GOOGLE DRIVE / GOOGLE DOCS ID
+# ============================================================
+
+def extract_google_id(url):
+
+    patterns = [
+
+        r"drive\.google\.com/file/d/([^/]+)",
+
+        r"drive\.google\.com/open\?id=([^&]+)",
+
+        r"drive\.google\.com/uc\?id=([^&]+)",
+
+        r"drive\.google\.com/drive/folders/([^/?]+)",
+
+        r"docs\.google\.com/document/d/([^/]+)",
     ]
 
+    for pattern in patterns:
 
-def keyword_scores(
-    question,
-    chunks,
-):
+        match = re.search(
+            pattern,
+            url,
+        )
 
-    query_words = set(
-        important_words(question)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+# ============================================================
+# GOOGLE DOC DOWNLOAD
+# ============================================================
+
+def download_google_doc(url):
+
+    document_id = extract_google_id(url)
+
+    if not document_id:
+        raise ValueError(
+            "Invalid Google Docs link."
+        )
+
+    export_url = (
+        f"https://docs.google.com/document/d/"
+        f"{document_id}/export?format=docx"
     )
 
-    scores = np.zeros(
-        len(chunks),
+    response = requests.get(
+        export_url,
+        timeout=30,
+    )
+
+    if response.status_code != 200:
+        raise ValueError(
+            "Could not download Google Doc. "
+            "Make sure it is shared publicly."
+        )
+
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=".docx",
+    )
+
+    temp_file.write(response.content)
+    temp_file.close()
+
+    return temp_file.name
+
+
+# ============================================================
+# GOOGLE DRIVE FILE DOWNLOAD
+# ============================================================
+
+def download_drive_file(url):
+
+    document_id = extract_google_id(url)
+
+    if not document_id:
+        raise ValueError(
+            "Invalid Google Drive link."
+        )
+
+    download_url = (
+        "https://drive.google.com/uc"
+        f"?export=download&id={document_id}"
+    )
+
+    response = requests.get(
+        download_url,
+        timeout=30,
+    )
+
+    if response.status_code != 200:
+        raise ValueError(
+            "Could not download Google Drive file."
+        )
+
+    content_type = response.headers.get(
+        "content-type",
+        ""
+    ).lower()
+
+    # Most supported Drive files are handled as DOCX/PDF
+    if "pdf" in content_type:
+        suffix = ".pdf"
+    else:
+        suffix = ".docx"
+
+    temp_file = tempfile.NamedTemporaryFile(
+        delete=False,
+        suffix=suffix,
+    )
+
+    temp_file.write(response.content)
+    temp_file.close()
+
+    return temp_file.name, suffix
+
+
+# ============================================================
+# SEMANTIC SEARCH
+# ============================================================
+
+def semantic_search(question, top_k=8):
+
+    if (
+        st.session_state.index is None
+        or not st.session_state.chunks
+    ):
+        return []
+
+    model = load_embedding_model()
+
+    query_embedding = model.encode(
+        [question],
+        convert_to_numpy=True,
+        normalize_embeddings=True,
+    )
+
+    query_embedding = np.asarray(
+        query_embedding,
         dtype="float32",
     )
 
-    if not query_words:
-        return scores
+    scores, indices = (
+        st.session_state.index.search(
+            query_embedding,
+            min(
+                top_k,
+                len(st.session_state.chunks),
+            ),
+        )
+    )
 
-    for i, chunk in enumerate(chunks):
+    results = []
 
-        chunk_words = set(
-            re.findall(
-                r"\b[a-zA-Z0-9]+\b",
-                chunk["text"].lower(),
-            )
+    for score, index in zip(
+        scores[0],
+        indices[0],
+    ):
+
+        if index < 0:
+            continue
+
+        chunk = dict(
+            st.session_state.chunks[index]
         )
 
-        matches = len(
-            query_words.intersection(
-                chunk_words
-            )
-        )
+        chunk["semantic_score"] = float(score)
 
-        scores[i] = (
-            matches / len(query_words)
-        )
+        results.append(chunk)
 
-    return scores
+    return results
+
+
+# ============================================================
+# KEYWORD SCORE
+# ============================================================
+
+def keyword_score(question, text):
+
+    question_words = set(
+        re.findall(
+            r"\b[a-zA-Z0-9]+\b",
+            question.lower(),
+        )
+    )
+
+    text_words = set(
+        re.findall(
+            r"\b[a-zA-Z0-9]+\b",
+            text.lower(),
+        )
+    )
+
+    if not question_words:
+        return 0.0
+
+    matches = question_words.intersection(
+        text_words
+    )
+
+    return len(matches) / len(question_words)
 
 
 # ============================================================
 # HYBRID SEARCH
 # ============================================================
 
-def hybrid_search(
-    question,
-    top_k=TOP_K,
-):
+def hybrid_search(question, top_k=5):
 
-    if (
-        not st.session_state.chunks
-        or st.session_state.index is None
-    ):
+    candidates = semantic_search(
+        question,
+        top_k=12,
+    )
+
+    if not candidates:
         return []
 
-    model = load_embedding_model()
+    for item in candidates:
 
-    question_embedding = model.encode(
-        [question],
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-    ).astype("float32")
+        item["keyword_score"] = keyword_score(
+            question,
+            item["text"],
+        )
 
-    semantic_scores = (
-        st.session_state.embeddings
-        @ question_embedding[0]
+        item["score"] = (
+            0.70 * item["semantic_score"]
+            + 0.30 * item["keyword_score"]
+        )
+
+    candidates.sort(
+        key=lambda x: x["score"],
+        reverse=True,
     )
 
-    keyword_score = keyword_scores(
-        question,
-        st.session_state.chunks,
-    )
-
-    semantic_score = (
-        semantic_scores + 1.0
-    ) / 2.0
-
-    hybrid_score = (
-        0.70 * semantic_score
-        + 0.30 * keyword_score
-    )
-
-    ranked_indices = np.argsort(
-        hybrid_score
-    )[::-1][:top_k]
-
-    results = []
-
-    for index in ranked_indices:
-
-        result = dict(
-            st.session_state.chunks[
-                index
-            ]
-        )
-
-        result["semantic_score"] = float(
-            semantic_score[index]
-        )
-
-        result["keyword_score"] = float(
-            keyword_score[index]
-        )
-
-        result["hybrid_score"] = float(
-            hybrid_score[index]
-        )
-
-        results.append(result)
-
-    return results
+    return candidates[:top_k]
 
 
 # ============================================================
-# GROQ ANSWER GENERATION
+# GROQ ANSWER
 # ============================================================
 
-def answer_question(
-    question,
-    results,
-):
-
-    client = load_groq_client()
-
-    if client is None:
-
-        return (
-            "GROQ_API_KEY is not configured. "
-            "Please add GROQ_API_KEY to "
-            "Streamlit Secrets."
-        )
+def answer_question(question, results):
 
     if not results:
-
         return (
-            "I could not find relevant "
-            "information in the provided documents."
+            "I could not find relevant information "
+            "in the uploaded documents."
+        )
+
+    api_key = st.secrets.get(
+        "GROQ_API_KEY",
+        os.getenv("GROQ_API_KEY"),
+    )
+
+    if not api_key:
+        return (
+            "GROQ_API_KEY is not configured. "
+            "Please add it to Streamlit Secrets."
         )
 
     context_parts = []
@@ -758,16 +761,19 @@ def answer_question(
         start=1,
     ):
 
-        page = (
-            f", page {result['page']}"
-            if result["page"]
-            else ""
-        )
+        page_text = ""
+
+        if result["page"] is not None:
+            page_text = (
+                f"Page: {result['page']}"
+            )
 
         context_parts.append(
             f"""
-[Source {i}: {result['filename']}{page}]
-
+SOURCE {i}
+Filename: {result['filename']}
+{page_text}
+Content:
 {result['text']}
 """
         )
@@ -777,43 +783,41 @@ def answer_question(
     )
 
     prompt = f"""
-You are an AI document question-answering assistant.
+You are an AI document assistant.
 
-Answer the user's question using ONLY the
-document context provided below.
+Answer the user's question using ONLY
+the information contained in the provided sources.
 
-Rules:
+If the answer is not available in the sources,
+clearly say:
 
-1. Do not use outside knowledge.
-2. Do not invent information.
-3. If the answer is not available in the documents,
-   say exactly:
+"I could not find this information in the
+uploaded documents."
 
-"I could not find that information in the provided documents."
-
-4. Keep the answer clear and concise.
-5. When possible, mention the relevant document name.
-
-DOCUMENT CONTEXT:
-
-{context}
+Do not invent facts.
+Do not use outside knowledge.
 
 USER QUESTION:
-
 {question}
+
+DOCUMENT SOURCES:
+{context}
 """
 
     try:
 
+        client = load_groq_client(
+            api_key
+        )
+
         response = client.chat.completions.create(
-
-            model="openai/gpt-oss-120b",
-
+            model=GROQ_MODEL,
             messages=[
                 {
                     "role": "system",
                     "content": (
-                        "Answer only from the supplied "
+                        "You answer questions "
+                        "strictly from supplied "
                         "document context."
                     ),
                 },
@@ -822,303 +826,36 @@ USER QUESTION:
                     "content": prompt,
                 },
             ],
-
-            temperature=0,
+            temperature=0.1,
+            max_tokens=1000,
         )
+
+        return response.choices[0].message.content
+
+    except Exception as e:
 
         return (
-            response
-            .choices[0]
-            .message
-            .content
-        )
-
-    except Exception as error:
-
-        return (
-            "The AI answer service could not "
-            f"complete the request.\n\n"
-            f"Error: {error}"
+            "I could not generate the answer "
+            f"because of a Groq/API error:\n\n{e}"
         )
 
 
 # ============================================================
-# GOOGLE DRIVE / GOOGLE DOCS
+# HERO
 # ============================================================
 
-def normalize_google_drive_link(
-    drive_link
-):
-
-    link = drive_link.strip()
-
-    # --------------------------------------------------------
-    # Google Docs
-    # --------------------------------------------------------
-
-    docs_match = re.search(
-        r"docs\.google\.com/document/d/"
-        r"([a-zA-Z0-9_-]+)",
-        link,
-    )
-
-    if docs_match:
-
-        document_id = (
-            docs_match.group(1)
-        )
-
-        return {
-            "type": "google_doc",
-            "id": document_id,
-            "url": (
-                "https://docs.google.com/document/d/"
-                f"{document_id}/export?format=docx"
-            ),
-        }
-
-    # --------------------------------------------------------
-    # Google Drive Folder
-    # --------------------------------------------------------
-
-    folder_match = re.search(
-        r"/folders/([a-zA-Z0-9_-]+)",
-        link,
-    )
-
-    if folder_match:
-
-        folder_id = (
-            folder_match.group(1)
-        )
-
-        return {
-            "type": "folder",
-            "id": folder_id,
-            "url": (
-                "https://drive.google.com/drive/folders/"
-                f"{folder_id}"
-            ),
-        }
-
-    # --------------------------------------------------------
-    # Google Drive File
-    # --------------------------------------------------------
-
-    file_match = re.search(
-        r"/file/d/([a-zA-Z0-9_-]+)",
-        link,
-    )
-
-    if file_match:
-
-        file_id = (
-            file_match.group(1)
-        )
-
-        return {
-            "type": "file",
-            "id": file_id,
-            "url": (
-                "https://drive.google.com/file/d/"
-                f"{file_id}/view"
-            ),
-        }
-
-    # --------------------------------------------------------
-    # Google Drive open?id=...
-    # --------------------------------------------------------
-
-    parsed = urlparse(link)
-
-    query = parse_qs(
-        parsed.query
-    )
-
-    if "id" in query:
-
-        file_id = query["id"][0]
-
-        return {
-            "type": "file",
-            "id": file_id,
-            "url": (
-                "https://drive.google.com/uc?id="
-                f"{file_id}"
-            ),
-        }
-
-    raise ValueError(
-        "Invalid Google Drive link. "
-        "Use a Google Drive file/folder link "
-        "or a public Google Docs link."
-    )
-
-
-def download_google_doc(
-    document_id,
-    temp_dir,
-):
-
-    export_url = (
-        "https://docs.google.com/document/d/"
-        f"{document_id}/export?format=docx"
-    )
-
-    response = requests.get(
-        export_url,
-        timeout=30,
-        allow_redirects=True,
-    )
-
-    if response.status_code != 200:
-
-        raise ValueError(
-            "Could not access the Google Doc. "
-            "Make sure General access is "
-            "'Anyone with the link' and role is Viewer."
-        )
-
-    content_type = (
-        response.headers
-        .get("content-type", "")
-        .lower()
-    )
-
-    if (
-        "text/html" in content_type
-        and len(response.content) < 10000
-    ):
-
-        raise ValueError(
-            "Google Doc could not be downloaded. "
-            "Make sure the document is publicly accessible."
-        )
-
-    output_path = (
-        Path(temp_dir)
-        / f"Google_Doc_{document_id}.docx"
-    )
-
-    output_path.write_bytes(
-        response.content
-    )
-
-    return output_path
-
-
-def download_drive_link(
-    drive_link
-):
-
-    temp_dir = Path(
-        tempfile.mkdtemp(
-            prefix="drive_docs_"
-        )
-    )
-
-    drive = normalize_google_drive_link(
-        drive_link
-    )
-
-    # --------------------------------------------------------
-    # Google Docs
-    # --------------------------------------------------------
-
-    if drive["type"] == "google_doc":
-
-        output_path = download_google_doc(
-            drive["id"],
-            temp_dir,
-        )
-
-        return [output_path]
-
-    # --------------------------------------------------------
-    # Google Drive Folder
-    # --------------------------------------------------------
-
-    if drive["type"] == "folder":
-
-        gdown.download_folder(
-            url=drive["url"],
-            output=str(temp_dir),
-            quiet=True,
-            use_cookies=False,
-        )
-
-    # --------------------------------------------------------
-    # Google Drive File
-    # --------------------------------------------------------
-
-    else:
-
-        output_path = (
-            temp_dir
-            / "drive_download"
-        )
-
-        downloaded = gdown.download(
-            url=drive["url"],
-            output=str(output_path),
-            quiet=True,
-            use_cookies=False,
-        )
-
-        if downloaded is None:
-
-            raise ValueError(
-                "Could not download the Drive file. "
-                "Make sure it is shared as "
-                "'Anyone with the link'."
-            )
-
-    supported_files = []
-
-    for path in temp_dir.rglob("*"):
-
-        if (
-            path.is_file()
-            and path.suffix.lower()
-            in SUPPORTED_EXTENSIONS
-        ):
-
-            supported_files.append(path)
-
-    return supported_files
-
-
-# ============================================================
-# LOCAL FILE UPLOAD
-# ============================================================
-
-def read_uploaded_file(
-    uploaded_file
-):
-
-    suffix = Path(
-        uploaded_file.name
-    ).suffix.lower()
-
-    if suffix not in SUPPORTED_EXTENSIONS:
-        return None
-
-    temp_dir = Path(
-        tempfile.mkdtemp(
-            prefix="local_docs_"
-        )
-    )
-
-    file_path = (
-        temp_dir
-        / uploaded_file.name
-    )
-
-    file_path.write_bytes(
-        uploaded_file.getvalue()
-    )
-
-    return file_path
+st.markdown(
+    """
+    <div class="hero">
+        <h1>📚 AI Document Assistant</h1>
+        <p>
+            Upload your documents, search them intelligently,
+            and ask questions using AI.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -1127,35 +864,7 @@ def read_uploaded_file(
 
 with st.sidebar:
 
-    st.markdown(
-        """
-        <div style="
-            padding: 8px 0 22px 0;
-        ">
-
-            <div style="
-                font-size: 25px;
-                font-weight: 800;
-            ">
-                📚 DocuMind AI
-            </div>
-
-            <div style="
-                font-size: 13px;
-                color: #9ca3af;
-                margin-top: 4px;
-            ">
-                Intelligent Document Assistant
-            </div>
-
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    st.markdown(
-        "### 📂 Add Documents"
-    )
+    st.header("📂 Document Manager")
 
     uploaded_files = st.file_uploader(
         "Upload documents",
@@ -1166,55 +875,144 @@ with st.sidebar:
             "md",
         ],
         accept_multiple_files=True,
-        help=(
-            "Supported formats: "
-            "PDF, DOCX, TXT and MD"
-        ),
     )
 
-    st.markdown("---")
+    if uploaded_files:
 
-    st.markdown(
-        "### ☁️ Google Drive"
+        for uploaded_file in uploaded_files:
+
+            if (
+                uploaded_file.name
+                in st.session_state.processed_names
+            ):
+                continue
+
+            try:
+
+                with st.spinner(
+                    f"Processing {uploaded_file.name}..."
+                ):
+
+                    file_path = save_uploaded_file(
+                        uploaded_file
+                    )
+
+                    records = extract_document(
+                        file_path,
+                        uploaded_file.name,
+                    )
+
+                    process_records(records)
+
+                st.success(
+                    f"Loaded: {uploaded_file.name}"
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Could not process "
+                    f"{uploaded_file.name}: {e}"
+                )
+
+    st.divider()
+
+    st.subheader("🔗 Google Document")
+
+    google_url = st.text_input(
+        "Paste public Google Drive / Docs link",
+        placeholder="https://drive.google.com/...",
     )
-
-    drive_link = st.text_input(
-        "Drive or Google Docs link",
-        placeholder=(
-            "Paste Drive / Google Docs link..."
-        ),
-        label_visibility="collapsed",
-    )
-
-    load_drive = st.button(
-        "☁️ Load Document",
-        use_container_width=True,
-    )
-
-    st.markdown("---")
-
-    st.markdown(
-        "### 📊 Workspace"
-    )
-
-    st.metric(
-        "Documents",
-        len(
-            st.session_state.documents
-        ),
-    )
-
-    st.metric(
-        "Text Chunks",
-        len(
-            st.session_state.chunks
-        ),
-    )
-
-    st.markdown("---")
 
     if st.button(
-        "🗑️ Clear Workspace",
+        "Load Google Document",
+        use_container_width=True,
+    ):
+
+        if not google_url.strip():
+
+            st.warning(
+                "Please paste a Google link."
+            )
+
+        else:
+
+            try:
+
+                if "docs.google.com/document" in google_url:
+
+                    with st.spinner(
+                        "Downloading Google Doc..."
+                    ):
+
+                        file_path = download_google_doc(
+                            google_url
+                        )
+
+                        filename = (
+                            "Google_Document.docx"
+                        )
+
+                        records = extract_document(
+                            file_path,
+                            filename,
+                        )
+
+                        process_records(
+                            records
+                        )
+
+                    st.success(
+                        "Google Doc loaded successfully."
+                    )
+
+                elif "drive.google.com" in google_url:
+
+                    with st.spinner(
+                        "Downloading Google Drive file..."
+                    ):
+
+                        file_path, suffix = (
+                            download_drive_file(
+                                google_url
+                            )
+                        )
+
+                        filename = (
+                            "Google_Drive_Document"
+                            + suffix
+                        )
+
+                        records = extract_document(
+                            file_path,
+                            filename,
+                        )
+
+                        process_records(
+                            records
+                        )
+
+                    st.success(
+                        "Google Drive document loaded."
+                    )
+
+                else:
+
+                    st.error(
+                        "Please provide a valid "
+                        "Google Drive or Google Docs link."
+                    )
+
+            except Exception as e:
+
+                st.error(
+                    f"Google document loading failed: {e}"
+                )
+
+    st.divider()
+
+    if st.button(
+        "🗑️ Clear All Documents",
         use_container_width=True,
     ):
 
@@ -1222,407 +1020,91 @@ with st.sidebar:
         st.session_state.chunks = []
         st.session_state.embeddings = None
         st.session_state.index = None
-        st.session_state.processed_files = set()
-        st.session_state.chat_history = []
+        st.session_state.processed_names = set()
+
+        st.success(
+            "All documents cleared."
+        )
 
         st.rerun()
 
+
+# ============================================================
+# DASHBOARD METRICS
+# ============================================================
+
+col1, col2, col3 = st.columns(3)
+
+with col1:
+
     st.markdown(
-        """
-        <div style="
-            margin-top: 25px;
-            padding: 13px;
-            border-radius: 12px;
-            background: #1f2937;
-            color: #9ca3af;
-            font-size: 12px;
-            line-height: 1.5;
-        ">
-            🔒 Answers are generated from
-            retrieved document context.
+        f"""
+        <div class="metric-card">
+            <div class="metric-number">
+                {len(st.session_state.documents)}
+            </div>
+            <div class="metric-label">
+                Documents
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with col2:
+
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-number">
+                {len(st.session_state.chunks)}
+            </div>
+            <div class="metric-label">
+                Text Chunks
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+with col3:
+
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-number">
+                {len(st.session_state.messages)}
+            </div>
+            <div class="metric-label">
+                Questions
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
 
-# ============================================================
-# HERO
-# ============================================================
-
-st.markdown(
-    """
-    <div class="hero">
-
-        <div class="hero-title">
-            📚 AI Document Assistant
-        </div>
-
-        <div class="hero-subtitle">
-            Upload documents, connect Google Drive,
-            search intelligently and ask questions
-            using AI-powered document retrieval.
-        </div>
-
-        <div class="online-badge">
-            ● AI SYSTEM READY
-        </div>
-
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-# ============================================================
-# LOCAL UPLOAD PROCESSING
-# ============================================================
-
-new_records = []
-
-
-if uploaded_files:
-
-    for uploaded_file in uploaded_files:
-
-        file_id = (
-            f"local:"
-            f"{uploaded_file.name}:"
-            f"{uploaded_file.size}"
-        )
-
-        if (
-            file_id
-            not in st.session_state.processed_files
-        ):
-
-            file_path = read_uploaded_file(
-                uploaded_file
-            )
-
-            if file_path:
-
-                records = extract_document(
-                    file_path
-                )
-
-                if records:
-
-                    new_records.extend(
-                        records
-                    )
-
-                    st.session_state.documents.append(
-                        {
-                            "filename":
-                                uploaded_file.name,
-
-                            "source":
-                                "Local Upload",
-
-                            "characters":
-                                sum(
-                                    len(r["text"])
-                                    for r in records
-                                ),
-
-                            "pages":
-                                (
-                                    len(records)
-                                    if file_path.suffix.lower()
-                                    == ".pdf"
-                                    else None
-                                ),
-                        }
-                    )
-
-                    st.session_state.processed_files.add(
-                        file_id
-                    )
-
-
-# ============================================================
-# GOOGLE DRIVE PROCESSING
-# ============================================================
-
-if load_drive:
-
-    if not drive_link.strip():
-
-        st.warning(
-            "Please paste a Google Drive "
-            "or Google Docs link."
-        )
-
-    else:
-
-        with st.spinner(
-            "☁️ Loading document..."
-        ):
-
-            try:
-
-                drive_files = (
-                    download_drive_link(
-                        drive_link
-                    )
-                )
-
-                if not drive_files:
-
-                    st.warning(
-                        "No supported documents found. "
-                        "Use PDF, DOCX, TXT or MD."
-                    )
-
-                else:
-
-                    loaded_count = 0
-
-                    for file_path in drive_files:
-
-                        file_id = (
-                            f"drive:"
-                            f"{file_path.name}:"
-                            f"{file_path.stat().st_size}"
-                        )
-
-                        if (
-                            file_id
-                            in st.session_state.processed_files
-                        ):
-                            continue
-
-                        records = extract_document(
-                            file_path
-                        )
-
-                        if not records:
-                            continue
-
-                        new_records.extend(
-                            records
-                        )
-
-                        st.session_state.documents.append(
-                            {
-                                "filename":
-                                    file_path.name,
-
-                                "source":
-                                    "Google Drive",
-
-                                "characters":
-                                    sum(
-                                        len(r["text"])
-                                        for r in records
-                                    ),
-
-                                "pages":
-                                    (
-                                        len(records)
-                                        if file_path.suffix.lower()
-                                        == ".pdf"
-                                        else None
-                                    ),
-                            }
-                        )
-
-                        st.session_state.processed_files.add(
-                            file_id
-                        )
-
-                        loaded_count += 1
-
-                    if loaded_count:
-
-                        st.success(
-                            f"✓ Loaded "
-                            f"{loaded_count} document(s)."
-                        )
-
-                    else:
-
-                        st.info(
-                            "These documents are "
-                            "already loaded."
-                        )
-
-            except Exception as error:
-
-                st.error(
-                    f"Document loading failed: {error}"
-                )
-
-
-# ============================================================
-# PROCESS NEW DOCUMENTS
-# ============================================================
-
-if new_records:
-
-    with st.spinner(
-        "🧠 Analyzing documents..."
-    ):
-
-        new_chunks, new_embeddings, _ = (
-            process_documents(
-                new_records
-            )
-        )
-
-        if new_chunks:
-
-            if (
-                st.session_state.embeddings
-                is None
-            ):
-
-                st.session_state.chunks = (
-                    new_chunks
-                )
-
-                st.session_state.embeddings = (
-                    new_embeddings
-                )
-
-            else:
-
-                st.session_state.chunks = (
-                    st.session_state.chunks
-                    + new_chunks
-                )
-
-                st.session_state.embeddings = (
-                    np.vstack(
-                        [
-                            st.session_state.embeddings,
-                            new_embeddings,
-                        ]
-                    )
-                )
-
-            st.session_state.index = (
-                build_faiss_index(
-                    st.session_state.embeddings
-                )
-            )
-
-    st.success(
-        f"✓ Indexed "
-        f"{len(new_chunks)} new text chunks."
-    )
-
-
-# ============================================================
-# WORKSPACE OVERVIEW
-# ============================================================
-
-st.markdown(
-    """
-    <div class="section-title">
-        Workspace Overview
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-col1, col2, col3, col4 = st.columns(4)
-
-
-with col1:
-
-    st.metric(
-        "📄 Documents",
-        len(
-            st.session_state.documents
-        ),
-    )
-
-
-with col2:
-
-    st.metric(
-        "🧩 Text Chunks",
-        len(
-            st.session_state.chunks
-        ),
-    )
-
-
-with col3:
-
-    total_characters = sum(
-        document["characters"]
-        for document
-        in st.session_state.documents
-    )
-
-    st.metric(
-        "📝 Characters",
-        f"{total_characters:,}",
-    )
-
-
-with col4:
-
-    ai_status = (
-        "Ready"
-        if st.session_state.chunks
-        else "Waiting"
-    )
-
-    st.metric(
-        "⚡ AI Status",
-        ai_status,
-    )
+st.write("")
 
 
 # ============================================================
 # DOCUMENT LIBRARY
 # ============================================================
 
-st.markdown(
-    """
-    <div class="section-title">
-        📁 Document Library
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
+st.subheader("📖 Document Library")
 
 if st.session_state.documents:
 
-    for document in (
-        st.session_state.documents
-    ):
-
-        page_text = ""
-
-        if document["pages"]:
-            page_text = (
-                f" • "
-                f"{document['pages']} pages"
-            )
+    for document in st.session_state.documents:
 
         st.markdown(
             f"""
-            <div class="document-card">
-
-                <div class="document-name">
-                    📄 {document["filename"]}
-                </div>
-
-                <div class="document-meta">
-                    {document["source"]}
-                    •
-                    {document["characters"]:,}
-                    characters
-                    {page_text}
-                </div>
-
+            <div class="card">
+                <b>📄 {document['filename']}</b>
+                <br>
+                <span style="color:#6b7280;">
+                    Source: {document['source']}
+                </span>
             </div>
             """,
             unsafe_allow_html=True,
@@ -1630,57 +1112,22 @@ if st.session_state.documents:
 
 else:
 
-    st.markdown(
-        """
-        <div class="info-card">
-
-            <b>📂 No documents loaded</b>
-
-            <br><br>
-
-            Upload a PDF, DOCX, TXT or MD file
-            from the sidebar, or connect a
-            public Google Drive document.
-
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.info(
+        "📂 No documents loaded. "
+        "Upload a PDF, DOCX, TXT or MD file "
+        "from the sidebar, or connect a public "
+        "Google Drive / Google Docs document."
     )
 
 
 # ============================================================
-# CHAT HISTORY
+# CHAT SECTION
 # ============================================================
 
-for message in (
-    st.session_state.chat_history
-):
-
-    with st.chat_message(
-        message["role"]
-    ):
-
-        st.markdown(
-            message["content"]
-        )
-
-
-# ============================================================
-# ASK DOCUMENTS
-# ============================================================
-
-st.markdown(
-    """
-    <div class="section-title">
-        💬 Ask Your Documents
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
+st.subheader("💬 Ask Your Documents")
 
 question = st.chat_input(
-    "Ask anything about your documents..."
+    "Ask a question about your documents..."
 )
 
 
@@ -1689,44 +1136,29 @@ if question:
     if not st.session_state.chunks:
 
         st.warning(
-            "Please upload or load a document first."
+            "Please upload a document first."
         )
 
     else:
 
-        # ----------------------------------------------------
-        # USER QUESTION
-        # ----------------------------------------------------
-
-        st.session_state.chat_history.append(
+        st.session_state.messages.append(
             {
                 "role": "user",
                 "content": question,
             }
         )
 
-        with st.chat_message("user"):
-
-            st.markdown(question)
-
-        # ----------------------------------------------------
-        # SEARCH
-        # ----------------------------------------------------
-
         with st.spinner(
-            "🔎 Searching your documents..."
+            "Searching your documents..."
         ):
 
             results = hybrid_search(
-                question
+                question,
+                top_k=5,
             )
 
-        # ----------------------------------------------------
-        # AI ANSWER
-        # ----------------------------------------------------
-
         with st.spinner(
-            "🤖 Generating answer..."
+            "Generating answer..."
         ):
 
             answer = answer_question(
@@ -1734,99 +1166,117 @@ if question:
                 results,
             )
 
-        st.session_state.chat_history.append(
+        st.session_state.messages.append(
             {
                 "role": "assistant",
                 "content": answer,
+                "results": results,
             }
         )
 
-        # ----------------------------------------------------
-        # ANSWER
-        # ----------------------------------------------------
 
-        with st.chat_message(
-            "assistant"
-        ):
+# ============================================================
+# DISPLAY CHAT
+# ============================================================
 
-            st.markdown(answer)
+for message in st.session_state.messages:
 
-        # ----------------------------------------------------
-        # SOURCES
-        # ----------------------------------------------------
+    if message["role"] == "user":
 
-        st.markdown(
-            """
-            <div class="section-title">
-                📚 Retrieved Sources
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
+        with st.chat_message("user"):
+            st.write(
+                message["content"]
+            )
 
-        if results:
+    else:
 
-            for i, result in enumerate(
-                results,
-                start=1,
-            ):
+        with st.chat_message("assistant"):
 
-                if result["page"]:
+            st.markdown(
+                message["content"]
+            )
 
-                    page_text = (
-                        f"Page {result['page']}"
-                    )
+            results = message.get(
+                "results",
+                [],
+            )
 
-                else:
-
-                    page_text = (
-                        "Page unavailable"
-                    )
+            if results:
 
                 st.markdown(
-                    f"""
-                    <div class="source-card">
+                    "### 📚 Sources"
+                )
+
+                for i, result in enumerate(
+                    results,
+                    start=1,
+                ):
+
+                    filename = result[
+                        "filename"
+                    ]
+
+                    page = result[
+                        "page"
+                    ]
+
+                    score = result[
+                        "score"
+                    ]
+
+                    text = result[
+                        "text"
+                    ]
+
+                    if page is not None:
+
+                        location = (
+                            f"Page {page}"
+                        )
+
+                    else:
+
+                        location = (
+                            "Document"
+                        )
+
+                    # Limit displayed source text
+                    preview = text[:500]
+
+                    if len(text) > 500:
+                        preview += "..."
+
+                    st.markdown(
+                        f"""
+                        <div class="source-card">
 
                         <div class="source-title">
-                            {i}.
-                            📄
-                            {result["filename"]}
+                            {i}. 📄 {filename}
                         </div>
 
                         <div class="source-meta">
-                            {page_text}
-                            •
-                            Relevance:
-                            {result["hybrid_score"]:.3f}
+                            {location}
+                            &nbsp; • &nbsp;
+                            Relevance: {score:.3f}
                         </div>
 
                         <div class="source-text">
-                            {result["text"]}
+                            {preview}
                         </div>
 
-                    </div>
-                    """,
-                    unsafe_allow_html=True,
-                )
-
-        else:
-
-            st.info(
-                "No relevant document sources were found."
-            )
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
 
 
 # ============================================================
 # FOOTER
 # ============================================================
 
-st.markdown(
-    """
-    <div class="footer">
-        DocuMind AI • Intelligent Document Assistant
-        <br>
-        Semantic Search • Hybrid Retrieval • AI Answers
-    </div>
-    """,
-    unsafe_allow_html=True,
+st.divider()
+
+st.caption(
+    "AI Document Assistant • "
+    "Semantic Search + Hybrid Ranking + Groq"
 )
